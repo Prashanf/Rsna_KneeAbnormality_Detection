@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches and testing
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Data and large artifacts (keep directory structures with .gitkeep)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/embeddings/*
+!data/processed/embeddings/.gitkeep
+data/processed/llm_raw/*
+!data/processed/llm_raw/.gitkeep
+data/processed/checkpoints/*
+!data/processed/checkpoints/.gitkeep
+*.parquet
+*.npy
+*.dcm
+*.tar.gz
+*.zip
+
+# Environment / secrets
+.env
+.venv/
+venv/

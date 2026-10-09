@@ -1,0 +1,94 @@
+# Configuration for Knee MRI Multilabel Classification
+
+data:
+  # Base directories (overridden on Kaggle, e.g. /kaggle/input/competition-name)
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  kaggle_input_dir: "/kaggle/input"
+  kaggle_working_dir: "/kaggle/working"
+
+  # CSV files relative to raw_dir
+  train_csv: "train.csv"
+  train_series_csv: "train_series.csv"
+  test_csv: "test.csv"
+  test_series_csv: "test_series.csv"
+  sample_submission_csv: "sample_submission.csv"
+
+  # Series image folders relative to raw_dir
+  train_series_dir: "train_series"
+  test_series_dir: "test_series"
+
+  # Processed artifact paths relative to processed_dir
+  integrity_report: "data/processed/integrity_report.json"
+  train_labels_llm: "data/processed/train_labels_llm.csv"
+  label_audit: "data/processed/label_audit.csv"
+  series_index: "data/processed/series_index.parquet"
+  embeddings_dir: "data/processed/embeddings"
+  checkpoints_dir: "data/processed/checkpoints"
+
+labels:
+  target_names:
+    - "ACL"
+    - "MCL"
+    - "Medial Meniscus"
+    - "Lateral Meniscus"
+    - "Medial OA"
+    - "Lateral OA"
+    - "PF OA"
+    - "Effusion"
+    - "Synovitis"
+    - "Baker's"
+    - "Contusion"
+    - "Fracture"
+
+llm:
+  provider: "anthropic"
+  model: "claude-3-5-sonnet-20241022"
+  raw_output_dir: "data/processed/llm_raw"
+  concurrency: 4
+  temperature: 0.0
+  max_retries: 3
+
+embedding:
+  encoder_name: "resnet50"  # options: "resnet50", "dinov2_small", "dinov2_base"
+  input_size: 224
+  batch_size: 64
+  num_workers: 2
+  device: "auto"            # "auto", "cuda", "mps", or "cpu"
+  norm_strategy: "percentile" # percentile clipping (1% - 99%) followed by [0, 1] scaling
+  percentile_low: 1.0
+  percentile_high: 99.0
+
+model:
+  series_encoder:
+    d_model: 128
+    n_heads: 4
+    n_layers: 2
+    dim_feedforward: 256
+    dropout: 0.1
+    pooling: "attention"    # gated attention-MIL
+  fusion:
+    d_model: 128
+    n_heads: 4
+    n_layers: 2
+    dim_feedforward: 256
+    dropout: 0.1
+    pooling: "attention"
+  metadata:
+    embed_dim: 32
+    planes: ["Sagittal", "Coronal", "Axial", "Unknown"]
+  num_classes: 12
+
+training:
+  batch_size: 8
+  num_workers: 2
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.01
+  warmup_epochs: 2
+  gradient_clip_val: 1.0
+  seed: 42
+  val_size: 0.2
+  stratify: true
+  early_stopping_patience: 5
+  eval_metric: "mean_auroc"  # "mean_auroc" or "val_loss"
