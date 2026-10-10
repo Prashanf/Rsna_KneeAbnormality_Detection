@@ -43,7 +43,7 @@ labels:
 
 llm:
   provider: "gemini"               # options: "gemini", "anthropic", "multilingual"
-  model: "gemini-2.5-flash"        # options: "gemini-2.5-flash", "gemini-3.8-flash", "claude-3-5-sonnet-20241022"
+  model: "gemini-3.8-flash"        # options: "gemini-3.8-flash", "gemini-3.5-flash-lite", "claude-3-5-sonnet-20241022"
   raw_output_dir: "data/processed/llm_raw"
   concurrency: 4
   temperature: 0.0

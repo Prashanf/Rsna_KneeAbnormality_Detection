@@ -160,7 +160,18 @@ class LLMExtractor:
         self.client = None
 
         if self.provider in ("gemini", "google"):
-            self.model = model or "gemini-2.5-flash"
+            raw_model = model or "gemini-3.8-flash"
+            # Auto-upgrade deprecated/legacy Gemini models (e.g. gemini-2.5, gemini-2.0, gemini-1.5)
+            deprecated_prefixes = ("gemini-2.5", "gemini-2.0", "gemini-1.5", "gemini-1.0")
+            if any(raw_model.startswith(p) for p in deprecated_prefixes):
+                logger.warning(
+                    f"Model '{raw_model}' is deprecated by Google Gemini API. "
+                    f"Automatically upgrading to 'gemini-3.8-flash'."
+                )
+                self.model = "gemini-3.8-flash"
+            else:
+                self.model = raw_model
+
             self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
             if not self.api_key:
                 logger.warning(

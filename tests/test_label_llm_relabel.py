@@ -166,10 +166,14 @@ def test_gemini_extractor_init_and_mock(monkeypatch):
     assert res_fallback["findings"]["ACL"]["present"] == 1
     assert res_fallback["findings"]["Medial Meniscus"]["present"] == 1
 
-    # 2. Provided key -> client initialized
-    ext_gemini = LLMExtractor(provider="gemini", model="gemini-2.5-flash", api_key="test_dummy_key")
+    # 2. Provided key -> client initialized with gemini-3.8-flash
+    ext_gemini = LLMExtractor(provider="gemini", model="gemini-3.8-flash", api_key="test_dummy_key")
     assert ext_gemini.client is not None
-    assert ext_gemini.model == "gemini-2.5-flash"
+    assert ext_gemini.model == "gemini-3.8-flash"
+
+    # Test auto-upgrade of legacy model
+    ext_legacy = LLMExtractor(provider="gemini", model="gemini-2.5-flash", api_key="test_dummy_key")
+    assert ext_legacy.model == "gemini-3.8-flash"
 
     # 3. Mock _call_gemini returning structured JSON response
     mock_json_response = json.dumps({
