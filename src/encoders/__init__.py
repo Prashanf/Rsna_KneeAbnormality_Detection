@@ -29,8 +29,13 @@ class DummyMockEncoder(BaseSliceEncoder):
 
 ENCODER_REGISTRY = {
     "resnet50": ResNet50Encoder,
+    "dinov2": lambda **kwargs: DINOv2Encoder(variant="dinov2_small", **kwargs),
     "dinov2_small": lambda **kwargs: DINOv2Encoder(variant="dinov2_small", **kwargs),
     "dinov2_base": lambda **kwargs: DINOv2Encoder(variant="dinov2_base", **kwargs),
+    "dinov3": lambda **kwargs: DINOv2Encoder(variant="dinov3_small", **kwargs),
+    "dino_v3": lambda **kwargs: DINOv2Encoder(variant="dinov3_small", **kwargs),
+    "dinov3_small": lambda **kwargs: DINOv2Encoder(variant="dinov3_small", **kwargs),
+    "dinov3_base": lambda **kwargs: DINOv2Encoder(variant="dinov3_base", **kwargs),
     "dummy_mock": DummyMockEncoder,
 }
 
@@ -47,8 +52,10 @@ def get_encoder(
 
     Supported names:
     - 'resnet50' (2048-dim)
-    - 'dinov2_small' (384-dim)
+    - 'dinov2' / 'dinov2_small' (384-dim)
     - 'dinov2_base' (768-dim)
+    - 'dinov3' / 'dino_v3' / 'dinov3_small' (384-dim)
+    - 'dinov3_base' (768-dim)
     - 'dummy_mock' (64-dim, lightweight offline testing)
     """
     name_clean = name.lower()

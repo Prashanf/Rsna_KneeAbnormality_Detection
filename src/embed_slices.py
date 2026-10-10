@@ -37,6 +37,7 @@ def embed_series(
     output_path: Optional[Union[str, Path]] = None,
     batch_size: int = 32,
     overwrite: bool = False,
+    num_workers: int = 4,
 ) -> Optional[np.ndarray]:
     """
     Extracts fixed-dim feature vectors for every slice in a single MRI series.
@@ -63,22 +64,27 @@ def embed_series(
     img_size = encoder.img_size
     all_embeddings: List[np.ndarray] = []
 
+    def _load_slice(p: Path) -> np.ndarray:
+        try:
+            return read_dicom_slice(
+                p,
+                target_size=(img_size, img_size),
+                normalize=True,
+                to_rgb=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed decoding slice {p.name}: {e}. Replacing with zero frame.")
+            return np.zeros((3, img_size, img_size), dtype=np.float32)
+
     for i in range(0, len(slice_files), batch_size):
         batch_paths = slice_files[i : i + batch_size]
-        batch_images = []
 
-        for f in batch_paths:
-            try:
-                img_3ch = read_dicom_slice(
-                    f,
-                    target_size=(img_size, img_size),
-                    normalize=True,
-                    to_rgb=True,
-                )
-                batch_images.append(img_3ch)
-            except Exception as e:
-                logger.error(f"Failed decoding slice {f.name}: {e}. Replacing with zero frame.")
-                batch_images.append(np.zeros((3, img_size, img_size), dtype=np.float32))
+        if num_workers > 1 and len(batch_paths) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(num_workers, len(batch_paths))) as executor:
+                batch_images = list(executor.map(_load_slice, batch_paths))
+        else:
+            batch_images = [_load_slice(p) for p in batch_paths]
 
         # Shape [B, 3, H, W]
         batch_arr = np.stack(batch_images, axis=0)
@@ -127,6 +133,7 @@ def embed_all_series(
     overwrite: bool = False,
     limit: Optional[int] = None,
     device: str = "auto",
+    num_workers: int = 4,
 ) -> Dict[str, Any]:
     """
     Main Phase 3 runner: iterates over all series in the dataset,
@@ -189,6 +196,7 @@ def embed_all_series(
                 output_path=out_file,
                 batch_size=batch_size,
                 overwrite=overwrite,
+                num_workers=num_workers,
             )
             if res is not None:
                 embedded_count += 1

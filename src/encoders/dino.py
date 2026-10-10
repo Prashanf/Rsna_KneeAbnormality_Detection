@@ -20,6 +20,8 @@ class DINOv2Encoder(BaseSliceEncoder):
     MODEL_CONFIGS = {
         "dinov2_small": ("vit_small_patch14_dinov2.lvd142m", 384),
         "dinov2_base": ("vit_base_patch14_dinov2.lvd142m", 768),
+        "dinov3_small": ("vit_small_patch16_dinov3", 384),
+        "dinov3_base": ("vit_base_patch16_dinov3", 768),
     }
 
     def __init__(
