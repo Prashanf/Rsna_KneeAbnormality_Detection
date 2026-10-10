@@ -173,6 +173,15 @@ def embed_all_series(
             continue
 
         s_dir = raw_path / train_series_dir / study_uid / series_uid
+        if not s_dir.exists():
+            for alt in [
+                raw_path / study_uid / series_uid,
+                raw_path / "train" / study_uid / series_uid,
+                raw_path / "train_images" / study_uid / series_uid,
+            ]:
+                if alt.exists():
+                    s_dir = alt
+                    break
         try:
             res = embed_series(
                 series_dir=s_dir,
