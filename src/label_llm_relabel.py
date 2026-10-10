@@ -187,6 +187,13 @@ class LLMExtractor:
                     logger.info(f"Initialized Gemini client with model '{self.model}'.")
                 except Exception as e:
                     logger.warning(f"Could not initialize Gemini client ({e}). Falling back to clinical extractor.")
+        elif self.provider in ("qwen", "local_llm", "huggingface"):
+            self.model = model or "Qwen/Qwen2.5-7B-Instruct"
+            self.api_key = None
+            self.request_delay = 0.0  # Local inference needs no network rate pacing
+            self.tokenizer = None
+            self.llm_model = None
+            self._init_local_llm()
         elif self.provider == "anthropic":
             self.model = model or "claude-3-5-sonnet-20241022"
             self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -205,6 +212,98 @@ class LLMExtractor:
         else:
             self.model = model or "clinical-multilingual"
             self.api_key = None
+
+    def _init_local_llm(self):
+        """Initializes local open-source LLM (e.g. Qwen2.5-7B) on GPU."""
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            logger.info(f"Loading local open-source model '{self.model}'...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model,
+                trust_remote_code=True,
+            )
+
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                logger.info(f"CUDA GPU detected: {gpu_name}")
+                try:
+                    from transformers import BitsAndBytesConfig
+                    bnb_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4",
+                    )
+                    self.llm_model = AutoModelForCausalLM.from_pretrained(
+                        self.model,
+                        quantization_config=bnb_config,
+                        device_map="auto",
+                        trust_remote_code=True,
+                    )
+                    logger.info("Loaded model in 4-bit precision (efficient VRAM footprint ~5GB).")
+                except Exception as bnb_err:
+                    logger.info(f"4-bit loading not available ({bnb_err}), loading in float16...")
+                    self.llm_model = AutoModelForCausalLM.from_pretrained(
+                        self.model,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True,
+                    )
+            elif torch.backends.mps.is_available():
+                logger.info("MPS (Apple Silicon) detected, loading in float16...")
+                self.llm_model = AutoModelForCausalLM.from_pretrained(
+                    self.model,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+            else:
+                logger.warning("No GPU found; loading on CPU (generation may be slow).")
+                self.llm_model = AutoModelForCausalLM.from_pretrained(
+                    self.model,
+                    torch_dtype=torch.float32,
+                    device_map="cpu",
+                    trust_remote_code=True,
+                )
+
+            self.client = self.llm_model
+            logger.info(f"✓ Local model '{self.model}' successfully initialized.")
+        except Exception as e:
+            logger.warning(f"Could not initialize local model '{self.model}': {e}. Falling back to clinical extractor.")
+            self.client = None
+
+    def _call_local_llm(self, report_text: str) -> str:
+        """Runs local generation on GPU using Qwen2.5 chat template."""
+        import torch
+
+        messages = [
+            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Radiology Report:\n\n{report_text}"},
+        ]
+
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        device = getattr(self.llm_model, "device", "cuda" if torch.cuda.is_available() else "cpu")
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(device)
+
+        with torch.no_grad():
+            generated_ids = self.llm_model.generate(
+                **model_inputs,
+                max_new_tokens=1024,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+
+        input_len = model_inputs.input_ids.shape[1]
+        output_ids = generated_ids[0][input_len:]
+        response_text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+        return response_text
 
     def _call_gemini(self, report_text: str) -> str:
         """Invokes Gemini API via google-genai SDK with JSON output formatting."""
@@ -251,6 +350,10 @@ class LLMExtractor:
             try:
                 if self.provider in ("gemini", "google"):
                     raw_content = self._call_gemini(report_text)
+                    parsed = clean_json_response(raw_content)
+                    return self._validate_and_normalize(parsed)
+                elif self.provider in ("qwen", "local_llm", "huggingface"):
+                    raw_content = self._call_local_llm(report_text)
                     parsed = clean_json_response(raw_content)
                     return self._validate_and_normalize(parsed)
                 elif self.provider == "anthropic":
@@ -526,7 +629,7 @@ def relabel_all_studies(
     """
     Top-level helper function for Phase 2 re-labeling.
     Used by scripts and Kaggle notebooks.
-    Providers supported: 'gemini', 'anthropic', 'multilingual', 'mock'.
+    Providers supported: 'qwen', 'local_llm', 'gemini', 'anthropic', 'multilingual', 'mock'.
     """
     extractor = LLMExtractor(provider=provider, model=model, api_key=api_key)
     relabeler = ReportRelabeler(
@@ -539,7 +642,7 @@ def relabel_all_studies(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Multilingual Label Re-derivation with Gemini or local NLP")
+    parser = argparse.ArgumentParser(description="Run Multilingual Label Re-derivation with Qwen, Gemini, or local NLP")
     parser.add_argument("--raw-dir", type=str, default="data/raw", help="Path to raw data directory")
     parser.add_argument("--processed-dir", type=str, default="data/processed", help="Path to processed output directory")
     parser.add_argument("--train-csv", type=str, default="train.csv", help="Filename of training CSV")
@@ -547,14 +650,14 @@ def main():
         "--provider",
         type=str,
         default="gemini",
-        choices=["gemini", "google", "anthropic", "multilingual", "mock"],
-        help="Extractor provider: gemini (default), anthropic, multilingual, or mock",
+        choices=["gemini", "google", "qwen", "local_llm", "anthropic", "multilingual", "mock"],
+        help="Extractor provider: qwen (local GPU), gemini, anthropic, multilingual, or mock",
     )
     parser.add_argument(
         "--model",
         type=str,
         default=None,
-        help="Model name (e.g. gemini-2.5-flash, gemini-3.8-flash, claude-3-5-sonnet-20241022)",
+        help="Model name (e.g. Qwen/Qwen2.5-7B-Instruct, gemini-3.8-flash, claude-3-5-sonnet-20241022)",
     )
     parser.add_argument("--api-key", type=str, default=None, help="Gemini or Anthropic API key")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of studies for test/dry run")

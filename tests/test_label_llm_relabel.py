@@ -207,3 +207,49 @@ def test_gemini_extractor_init_and_mock(monkeypatch):
     assert extracted["findings"]["Lateral Meniscus"]["present"] == 0
     assert extracted["findings"]["Fracture"]["present"] == 0
 
+
+def test_qwen_extractor_init_and_mock(monkeypatch):
+    """Verify Qwen provider initialization and mock generation."""
+    # Mock _init_local_llm to avoid downloading 7B weights in unit tests
+    def mock_init(self):
+        self.client = "mock_model"
+        self.llm_model = "mock_model"
+        self.tokenizer = "mock_tokenizer"
+
+    monkeypatch.setattr(LLMExtractor, "_init_local_llm", mock_init)
+    ext_qwen = LLMExtractor(provider="qwen", model="Qwen/Qwen2.5-7B-Instruct")
+    assert ext_qwen.provider == "qwen"
+    assert ext_qwen.model == "Qwen/Qwen2.5-7B-Instruct"
+    assert ext_qwen.request_delay == 0.0
+
+    mock_qwen_response = json.dumps({
+        "detected_language": "tr",
+        "findings": {
+            "ACL": {"present": 1, "explicitly_mentioned": True, "evidence": "ön çapraz bağda rüptür", "uncertain": False},
+            "MCL": {"present": 0, "explicitly_mentioned": True, "evidence": "", "uncertain": False},
+            "Medial Meniscus": {"present": 1, "explicitly_mentioned": True, "evidence": "medial menisküs posterior boynuzda yırtık", "uncertain": False},
+            "Lateral Meniscus": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+            "Medial OA": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+            "Lateral OA": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+            "PF OA": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+            "Effusion": {"present": 1, "explicitly_mentioned": True, "evidence": "eklem içi belirgin effüzyon", "uncertain": False},
+            "Synovitis": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+            "Baker's": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+            "Contusion": {"present": 1, "explicitly_mentioned": True, "evidence": "lateral tibial platoda kemik iliği ödemi", "uncertain": False},
+            "Fracture": {"present": 0, "explicitly_mentioned": False, "evidence": "", "uncertain": False},
+        },
+        "summary": "Ön çapraz bağ ve medial menisküs yırtığı, kemik kontüzyonu ve eklem effüzyonu."
+    })
+
+    monkeypatch.setattr(ext_qwen, "_call_local_llm", lambda report_text: mock_qwen_response)
+    extracted = ext_qwen.extract_from_report("Turkish knee MRI report text...")
+
+    assert extracted["detected_language"] == "tr"
+    assert extracted["findings"]["ACL"]["present"] == 1
+    assert extracted["findings"]["Medial Meniscus"]["present"] == 1
+    assert extracted["findings"]["Effusion"]["present"] == 1
+    assert extracted["findings"]["Contusion"]["present"] == 1
+    assert extracted["findings"]["MCL"]["present"] == 0
+    assert extracted["findings"]["Fracture"]["present"] == 0
+
+
