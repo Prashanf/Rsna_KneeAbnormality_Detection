@@ -151,11 +151,13 @@ class LLMExtractor:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
-        max_retries: int = 3,
+        max_retries: int = 4,
+        request_delay: float = 2.0,
     ):
         self.provider = provider.lower()
         self.temperature = temperature
         self.max_retries = max_retries
+        self.request_delay = request_delay
         self.clinical_labeler = MultilingualKneeLabeler()
         self.client = None
 
@@ -264,8 +266,18 @@ class LLMExtractor:
                     return self._validate_and_normalize(parsed)
             except Exception as e:
                 last_error = e
-                logger.warning(f"LLM API attempt {attempt + 1}/{self.max_retries} failed: {e}. Retrying...")
-                time.sleep(2**attempt)
+                err_str = str(e).lower()
+                if "429" in err_str or "resource_exhausted" in err_str or "quota" in err_str:
+                    wait_time = 15 * (attempt + 1)
+                    logger.warning(
+                        f"Gemini rate limit (429 / Quota) reached on attempt {attempt + 1}/{self.max_retries}. "
+                        f"Backing off for {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    wait_time = 2**attempt
+                    logger.warning(f"LLM API attempt {attempt + 1}/{self.max_retries} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
 
         logger.error(f"All {self.max_retries} attempts failed. Falling back to clinical extractor: {last_error}")
         return self._clinical_extract(report_text)
@@ -376,6 +388,10 @@ class ReportRelabeler:
 
             with open(cache_file, "w") as f:
                 json.dump(extracted, f, indent=2)
+
+            # Polite pacing to respect RPM limits when calling external LLMs
+            if getattr(self.extractor, "request_delay", 0) > 0 and getattr(self.extractor, "client", None) is not None:
+                time.sleep(self.extractor.request_delay)
 
         return self.aggregate_and_audit(train_df)
 
