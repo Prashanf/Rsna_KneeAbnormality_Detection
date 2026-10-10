@@ -42,8 +42,8 @@ labels:
     - "Fracture"
 
 llm:
-  provider: "anthropic"
-  model: "claude-3-5-sonnet-20241022"
+  provider: "gemini"               # options: "gemini", "anthropic", "multilingual"
+  model: "gemini-2.5-flash"        # options: "gemini-2.5-flash", "gemini-3.8-flash", "claude-3-5-sonnet-20241022"
   raw_output_dir: "data/processed/llm_raw"
   concurrency: 4
   temperature: 0.0

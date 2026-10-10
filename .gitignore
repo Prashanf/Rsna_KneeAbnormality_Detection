@@ -14,6 +14,7 @@ htmlcov/
 .DS_Store
 
 # Data and large artifacts (keep directory structures with .gitkeep)
+train.csv
 data/raw/*
 !data/raw/.gitkeep
 data/processed/embeddings/*
@@ -22,6 +23,7 @@ data/processed/llm_raw/*
 !data/processed/llm_raw/.gitkeep
 data/processed/checkpoints/*
 !data/processed/checkpoints/.gitkeep
+scratch/
 *.parquet
 *.npy
 *.dcm
@@ -32,3 +34,4 @@ data/processed/checkpoints/*
 .env
 .venv/
 venv/
+

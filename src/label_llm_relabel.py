@@ -1,7 +1,8 @@
 """
-Phase 2: LLM-based label re-derivation from free-text radiology reports.
+Phase 2: Multilingual clinical label re-derivation from free-text radiology reports.
 Extracts 12 binary findings per study, caches responses incrementally,
-audits agreement against original train.csv labels, and produces clean training targets.
+audits agreement against ground-truth train.csv labels, and produces clean training targets.
+Outputs clean_train.csv in the workspace root and data/processed/train_labels_llm.csv.
 """
 
 import argparse
@@ -23,37 +24,91 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_audit import TARGET_LABELS
+from src.multilingual_labeler import MultilingualKneeLabeler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-EXTRACTION_SYSTEM_PROMPT = """You are an expert board-certified musculoskeletal radiologist.
-Your task is to analyze a knee MRI radiology report and determine the presence of 12 specific knee findings.
-The report text may be in English, Spanish, Portuguese, French, German, or another language. Translate internally and interpret accurately.
+EXTRACTION_SYSTEM_PROMPT = """You are a world-class, board-certified Musculoskeletal (MSK) Radiologist specializing in Knee MRI interpretation and multi-label pathology extraction.
 
-The 12 findings to evaluate are:
-1. "ACL": Anterior Cruciate Ligament tear (complete or partial) or rupture. (Intact, normal, or non-visualized without tear is 0).
-2. "MCL": Medial Collateral Ligament tear, rupture, sprain, or high-grade injury.
-3. "Medial Meniscus": Tear of the medial meniscus (radial, horizontal, bucket handle, complex, root tear, or maceration).
-4. "Lateral Meniscus": Tear of the lateral meniscus.
-5. "Medial OA": Osteoarthritis, chondropathy, cartilage wear/loss, or osteophytes in the MEDIAL tibiofemoral compartment.
-6. "Lateral OA": Osteoarthritis, chondropathy, cartilage wear/loss, or osteophytes in the LATERAL tibiofemoral compartment.
-7. "PF OA": Patellofemoral osteoarthritis, chondromalacia patellae (grades 2-4 / cartilage defect), or patellofemoral osteophytes.
-8. "Effusion": Joint effusion, fluid in suprapatellar recess or joint capsule. (Trace/physiologic fluid is 0).
-9. "Synovitis": Synovial thickening, inflammation, synovial hypertrophy, or synovitis.
-10. "Baker's": Baker's cyst, popliteal cyst, or gastrocnemius-semimembranosus bursal distension.
-11. "Contusion": Bone contusion, bone marrow edema, or bone bruise secondary to trauma.
-12. "Fracture": Fracture, cortical disruption, trabecular impaction fracture (patella, femur, tibia, or fibula).
+Your task is to analyze a knee MRI radiology report and extract the presence (0 or 1) of 12 distinct knee findings.
 
-Guidelines:
-- Negation: Explicit negatives (e.g. "no ACL tear", "menisci intact", "absence of effusion") must be 0.
-- Absence of mention: If a finding is not mentioned at all, set present=0 and explicitly_mentioned=false.
-- Uncertain: If findings are equivocal, ambiguous, or borderline, set uncertain=true.
-- Provide a brief exact quote (evidence_span) for each finding where present=1.
+The report text may be written in English, Turkish, Spanish, Greek, Croatian/Serbian, Cyrillic (Bulgarian/Russian), Dutch, French, German, or a mixture of languages. 
+Translate internally and interpret native clinical and anatomical terminology accurately.
 
-Return ONLY a valid JSON object matching this exact schema:
+---
+### THE 12 TARGET FINDINGS & CLINICAL DEFINITIONS:
+
+1. "ACL" (Anterior Cruciate Ligament Injury):
+   - Positive (1): Complete or partial tear, full disruption, high-grade sprain, avulsion, mucoid degeneration with tear, or ruptured ACL reconstruction graft. Also mark 1 if the ACL is non-visualized/absent in the context of trauma.
+   - Negative (0): Intact ligament, normal morphology and signal intensity, unremarkable, or intact postoperative graft. Mucoid degeneration without tear is 0.
+
+2. "MCL" (Medial Collateral Ligament Injury):
+   - Positive (1): Sprain (Grade I, II, or III), partial tear, complete rupture, avulsion, or periligamentous fluid/edema with fiber discontinuity.
+   - Negative (0): Intact ligament, normal thickness and signal, unremarkable.
+
+3. "Medial Meniscus" (Tear):
+   - Positive (1): True tear of the medial meniscus (radial, horizontal cleavage, longitudinal, oblique, bucket-handle, complex, flap, root tear, or maceration/substance loss with tear). Grade 3 intrameniscal signal contacting the superior or inferior articular surface.
+   - Negative (0): Intact, normal, or isolated Grade 1/2 degenerative intrameniscal signal that does NOT communicate with the articular surface. Mild surface fraying without true tear = 0.
+
+4. "Lateral Meniscus" (Tear):
+   - Positive (1): True tear of the lateral meniscus (radial, horizontal, longitudinal, complex, bucket-handle, anterior or posterior horn tear, root tear). Grade 3 intrameniscal signal reaching the articular margin.
+   - Negative (0): Intact, normal, or Grade 1/2 intrameniscal signal without articular surface extension.
+
+5. "Medial OA" (Medial Compartment Osteoarthritis):
+   - Positive (1): Osteoarthritis, chondropathy, chondromalacia, partial or full-thickness cartilage defect/wear, subchondral sclerosis/geodes, or marginal osteophytes localized to the MEDIAL tibiofemoral compartment (medial femoral condyle or medial tibial plateau). Also positive if generalized "tricompartmental osteoarthritis" is diagnosed.
+   - Negative (0): Intact medial compartment cartilage, normal joint space, or OA strictly confined to the lateral or patellofemoral compartments.
+
+6. "Lateral OA" (Lateral Compartment Osteoarthritis):
+   - Positive (1): Osteoarthritis, chondropathy, chondromalacia, partial or full-thickness cartilage defect/wear, subchondral sclerosis, or marginal osteophytes localized to the LATERAL tibiofemoral compartment (lateral femoral condyle or lateral tibial plateau). Also positive if generalized "tricompartmental osteoarthritis" is diagnosed.
+   - Negative (0): Intact lateral compartment cartilage, normal joint space, or OA strictly confined to the medial or patellofemoral compartments.
+
+7. "PF OA" (Patellofemoral Osteoarthritis):
+   - Positive (1): Patellofemoral osteoarthritis, chondromalacia patellae (grades 2 to 4 / cartilage fissure, partial/full-thickness defect of patellar facets or femoral trochlea), patellofemoral joint space narrowing, or patellar/trochlear osteophytes. Also positive if "tricompartmental osteoarthritis" is diagnosed.
+   - Negative (0): Normal patellofemoral cartilage, or grade 1 cartilage softening without defect.
+
+8. "Effusion" (Joint Effusion):
+   - Positive (1): Pathological joint effusion, moderate or large intra-articular fluid collection, prominent fluid distension of suprapatellar recess, lateral gutters, or capsular distension.
+   - Negative (0): Physiological, trace, minimal, or physiological volume of joint fluid. Explicit absence of effusion ("no effusion", "sin derrame", "effüzyon saptanmadı", "kein Erguss") = 0.
+
+9. "Synovitis":
+   - Positive (1): Synovial thickening, hypertrophy, inflammatory proliferation, synovial plica syndrome with inflammatory reaction, or synovial pannus.
+   - Negative (0): Normal synovium, absence of synovial thickening, or simple non-inflammatory clear effusion.
+
+10. "Baker's" (Baker's / Popliteal Cyst):
+    - Positive (1): Baker's cyst, popliteal cyst, or fluid distension of the gastrocnemius-semimembranosus bursa (intact or ruptured).
+    - Negative (0): No popliteal cyst mentioned, normal popliteal fossa.
+
+11. "Contusion" (Bone Contusion / Bone Bruise):
+    - Positive (1): Bone contusion, bone bruise, trabecular microfracture, or bone marrow edema (BME) secondary to acute/subacute trauma or impaction (femoral condyles, tibial plateaus, patella, fibula).
+    - Negative (0): Normal bone marrow signal, or isolated subchondral degenerative edema/geode directly caused by chronic osteoarthritis without acute traumatic contusion.
+
+12. "Fracture":
+    - Positive (1): Cortical fracture, macroscopic fracture line, cortical disruption/step-off, avulsion fracture (Segond fracture, tibial spine avulsion), patellar fracture, tibial plateau fracture, or impaction fracture.
+    - Negative (0): Intact bony cortex, no fracture. (Isolated bone contusion without cortical fracture line = 0).
+
+---
+### CRITICAL REASONING & EXTRACTION GUIDELINES:
+
+1. Negation Handling:
+   - Rigorously detect medical negations across all languages (e.g. English: "no tear", "intact", "without"; Spanish: "sin", "no se aprecia", "descartado"; Turkish: "izlenmedi", "saptanmadı", "doğal", "yırtık yok"; Greek: "χωρίς", "φυσιολογικό"; Croatian: "nema", "uredan", "bez"; French: "absence de", "intact"; German: "kein", "regelrecht").
+   - An explicitly negated finding MUST be present=0.
+
+2. Absence of Mention:
+   - If a finding or structure is not described at all in the report, set present=0 and explicitly_mentioned=false.
+
+3. Compartment Specificity:
+   - Do NOT conflate medial vs. lateral pathology. A medial meniscus tear does NOT make Lateral Meniscus positive.
+   - Medial OA and Lateral OA require pathology in their specific compartment, UNLESS "tricompartmental OA" is explicitly noted (which marks Medial OA=1, Lateral OA=1, and PF OA=1).
+
+4. Evidence Spans:
+   - For every finding where present=1, extract the exact relevant phrase from the original report text as the "evidence" field.
+
+---
+### OUTPUT JSON FORMAT:
+Return ONLY a valid, parseable JSON object matching this schema:
 {
-  "detected_language": "<e.g. en, es, fr, de>",
+  "detected_language": "<e.g. en, tr, es, el, hr, bg, nl, fr, de>",
   "findings": {
     "ACL": {"present": 0, "explicitly_mentioned": false, "evidence": "", "uncertain": false},
     "MCL": {"present": 0, "explicitly_mentioned": false, "evidence": "", "uncertain": false},
@@ -68,7 +123,7 @@ Return ONLY a valid JSON object matching this exact schema:
     "Contusion": {"present": 0, "explicitly_mentioned": false, "evidence": "", "uncertain": false},
     "Fracture": {"present": 0, "explicitly_mentioned": false, "evidence": "", "uncertain": false}
   },
-  "summary": "<1-2 sentence overall radiologic impression>"
+  "summary": "<Concise 1-2 sentence overall radiological impression>"
 }
 """
 
@@ -76,12 +131,10 @@ Return ONLY a valid JSON object matching this exact schema:
 def clean_json_response(raw_text: str) -> Dict[str, Any]:
     """Extracts and parses JSON object from LLM response text."""
     text = raw_text.strip()
-    # Match markdown code block ```json ... ```
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         text = match.group(1)
     else:
-        # Match outermost curly braces
         match = re.search(r"(\{.*\})", text, re.DOTALL)
         if match:
             text = match.group(1)
@@ -90,43 +143,107 @@ def clean_json_response(raw_text: str) -> Dict[str, Any]:
 
 
 class LLMExtractor:
-    """Wrapper for LLM extraction with multiple provider support and offline mock fallback."""
+    """Wrapper for clinical extraction supporting Gemini, Anthropic, local multilingual NLP, or mock."""
 
     def __init__(
         self,
-        provider: str = "anthropic",
-        model: str = "claude-3-5-sonnet-20241022",
+        provider: str = "gemini",
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
         max_retries: int = 3,
     ):
         self.provider = provider.lower()
-        self.model = model
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("GEMINI_API_KEY")
         self.temperature = temperature
         self.max_retries = max_retries
+        self.clinical_labeler = MultilingualKneeLabeler()
+        self.client = None
 
-        if self.provider == "anthropic" and self.api_key:
-            import anthropic
-            self.client = anthropic.Anthropic(api_key=self.api_key)
+        if self.provider in ("gemini", "google"):
+            self.model = model or "gemini-2.5-flash"
+            self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            if not self.api_key:
+                logger.warning(
+                    "No GEMINI_API_KEY or GOOGLE_API_KEY set. "
+                    "Set environment variable or pass --api-key. Falling back to local clinical extractor."
+                )
+            else:
+                try:
+                    from google import genai
+                    self.client = genai.Client(api_key=self.api_key)
+                    logger.info(f"Initialized Gemini client with model '{self.model}'.")
+                except Exception as e:
+                    logger.warning(f"Could not initialize Gemini client ({e}). Falling back to clinical extractor.")
+        elif self.provider == "anthropic":
+            self.model = model or "claude-3-5-sonnet-20241022"
+            self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if not self.api_key:
+                logger.warning(
+                    "No ANTHROPIC_API_KEY set. "
+                    "Set environment variable or pass --api-key. Falling back to local clinical extractor."
+                )
+            else:
+                try:
+                    import anthropic
+                    self.client = anthropic.Anthropic(api_key=self.api_key)
+                    logger.info(f"Initialized Anthropic client with model '{self.model}'.")
+                except Exception as e:
+                    logger.warning(f"Could not initialize Anthropic client ({e}). Falling back to clinical extractor.")
         else:
-            self.client = None
+            self.model = model or "clinical-multilingual"
+            self.api_key = None
+
+    def _call_gemini(self, report_text: str) -> str:
+        """Invokes Gemini API via google-genai SDK with JSON output formatting."""
+        prompt = f"Radiology Report:\n\n{report_text}"
+
+        # 1. Check if interactions API is supported (google-genai v2+)
+        if hasattr(self.client, "interactions") and callable(getattr(self.client.interactions, "create", None)):
+            try:
+                interaction = self.client.interactions.create(
+                    model=self.model,
+                    input=prompt,
+                    system_instruction=EXTRACTION_SYSTEM_PROMPT,
+                    response_format=[{"type": "text", "mime_type": "application/json"}],
+                )
+                if interaction and getattr(interaction, "output_text", None):
+                    return interaction.output_text
+            except Exception as err:
+                logger.debug(f"Interactions API call unsuccessful ({err}), attempting models.generate_content fallback")
+
+        # 2. Standard models.generate_content (google-genai 1.x and 2.x)
+        from google.genai import types
+        config = types.GenerateContentConfig(
+            system_instruction=EXTRACTION_SYSTEM_PROMPT,
+            temperature=self.temperature,
+            response_mime_type="application/json",
+        )
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=config,
+        )
+        return response.text
 
     def extract_from_report(self, report_text: str) -> Dict[str, Any]:
         """Extracts structured 12-label findings from a single report string."""
         if not report_text or not isinstance(report_text, str) or report_text.strip() == "":
             return self._empty_response()
 
-        if self.provider == "mock" or self.client is None:
-            return self._heuristic_mock_extract(report_text)
+        if self.provider in ("multilingual", "clinical", "local", "mock") or self.client is None:
+            return self._clinical_extract(report_text)
 
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                if self.provider == "anthropic":
+                if self.provider in ("gemini", "google"):
+                    raw_content = self._call_gemini(report_text)
+                    parsed = clean_json_response(raw_content)
+                    return self._validate_and_normalize(parsed)
+                elif self.provider == "anthropic":
                     response = self.client.messages.create(
                         model=self.model,
-                        max_tokens=1000,
+                        max_tokens=1500,
                         temperature=self.temperature,
                         system=EXTRACTION_SYSTEM_PROMPT,
                         messages=[{"role": "user", "content": f"Radiology Report:\n\n{report_text}"}],
@@ -136,11 +253,11 @@ class LLMExtractor:
                     return self._validate_and_normalize(parsed)
             except Exception as e:
                 last_error = e
-                logger.warning(f"LLM API attempt {attempt + 1} failed: {e}. Retrying...")
+                logger.warning(f"LLM API attempt {attempt + 1}/{self.max_retries} failed: {e}. Retrying...")
                 time.sleep(2**attempt)
 
-        logger.error(f"All {self.max_retries} attempts failed. Falling back to heuristic extractor: {last_error}")
-        return self._heuristic_mock_extract(report_text)
+        logger.error(f"All {self.max_retries} attempts failed. Falling back to clinical extractor: {last_error}")
+        return self._clinical_extract(report_text)
 
     def _empty_response(self) -> Dict[str, Any]:
         return {
@@ -149,55 +266,25 @@ class LLMExtractor:
             "summary": "Empty report",
         }
 
-    def _heuristic_mock_extract(self, text: str) -> Dict[str, Any]:
-        """Rule-based extractor used for testing, offline runs, or fallback."""
-        lower = text.lower()
+    def _clinical_extract(self, text: str) -> Dict[str, Any]:
+        """Clinical multilingual parser covering all 9 languages."""
+        preds, evidence = self.clinical_labeler.parse_report_with_details(text)
+        lang = self.clinical_labeler.detect_language(text)
+
         findings = {}
-
-        patterns = {
-            "ACL": [r"\bacl\b.*tear", r"anterior cruciate ligament.*tear", r"rupture of the acl"],
-            "MCL": [r"\bmcl\b.*(?:tear|sprain)", r"medial collateral ligament.*(?:tear|sprain)"],
-            "Medial Meniscus": [r"medial meniscus.*tear", r"tear of the medial meniscus"],
-            "Lateral Meniscus": [r"lateral meniscus.*tear", r"tear of the lateral meniscus"],
-            "Medial OA": [r"medial.*(?:osteoarthritis|cartilage loss|chondropathy|joint space narrowing)"],
-            "Lateral OA": [r"lateral.*(?:osteoarthritis|cartilage loss|chondropathy)"],
-            "PF OA": [r"patellofemoral.*(?:osteoarthritis|chondromalacia|cartilage defect)"],
-            "Effusion": [r"(?:joint|moderate|large|suprapatellar)\s+effusion"],
-            "Synovitis": [r"synovitis", r"synovial thickening", r"synovial hypertrophy"],
-            "Baker's": [r"baker'?s?\s+cyst", r"popliteal cyst"],
-            "Contusion": [r"bone\s+(?:contusion|bruise)", r"trabecular microfracture", r"bone marrow edema"],
-            "Fracture": [r"\bfracture\b", r"cortical disruption"],
-        }
-
-        negations = ["no ", "without ", "intact", "unremarkable", "ruled out", "negative for"]
-
         for label in TARGET_LABELS:
-            present = 0
-            evidence = ""
-            matched_patterns = patterns.get(label, [])
-            for p in matched_patterns:
-                m = re.search(p, lower)
-                if m:
-                    # Check negative prefix
-                    start = max(0, m.start() - 25)
-                    prefix = lower[start : m.start()]
-                    is_neg = any(neg in prefix for neg in negations)
-                    if not is_neg:
-                        present = 1
-                        evidence = m.group(0)
-                        break
-
+            val = preds.get(label, 0)
             findings[label] = {
-                "present": present,
-                "explicitly_mentioned": label.lower() in lower or bool(evidence),
-                "evidence": evidence,
+                "present": int(val),
+                "explicitly_mentioned": True,
+                "evidence": str(evidence.get(label, "")),
                 "uncertain": False,
             }
 
         return {
-            "detected_language": "en",
+            "detected_language": lang,
             "findings": findings,
-            "summary": "Heuristic extraction",
+            "summary": f"Clinical NLP extraction ({lang})",
         }
 
     def _validate_and_normalize(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
@@ -232,10 +319,22 @@ class ReportRelabeler:
     ):
         self.raw_dir = Path(raw_dir)
         self.processed_dir = Path(processed_dir)
-        self.train_csv_path = self.raw_dir / train_csv
+
+        # Check raw_dir first, then PROJECT_ROOT, then train_csv
+        raw_candidate = self.raw_dir / train_csv
+        root_candidate = PROJECT_ROOT / train_csv
+        if raw_candidate.is_file():
+            self.train_csv_path = raw_candidate
+        elif root_candidate.is_file():
+            self.train_csv_path = root_candidate
+        elif Path(train_csv).is_file():
+            self.train_csv_path = Path(train_csv)
+        else:
+            self.train_csv_path = raw_candidate
+
         self.cache_dir = self.processed_dir / cache_subdir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.extractor = extractor or LLMExtractor()
+        self.extractor = extractor or LLMExtractor(provider="multilingual")
 
     def process_all_reports(self, limit: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -247,14 +346,13 @@ class ReportRelabeler:
         if limit is not None:
             train_df = train_df.iloc[:limit].copy()
 
-        logger.info(f"Loaded {len(train_df)} studies for LLM relabeling from {self.train_csv_path}")
+        logger.info(f"Loaded {len(train_df)} studies for relabeling from {self.train_csv_path}")
 
-        # Check existing cached studies
         cached_files = {p.stem for p in self.cache_dir.glob("*.json")}
         logger.info(f"Existing cache found: {len(cached_files)} studies already completed.")
 
         # Incremental processing loop
-        pbar = tqdm(train_df.iterrows(), total=len(train_df), desc="LLM relabeling")
+        pbar = tqdm(train_df.iterrows(), total=len(train_df), desc="Clinical relabeling")
         for _, row in pbar:
             study_uid = str(row["StudyInstanceUID"])
             cache_file = self.cache_dir / f"{study_uid}.json"
@@ -265,18 +363,22 @@ class ReportRelabeler:
             report_text = str(row.get("Report", ""))
             extracted = self.extractor.extract_from_report(report_text)
 
-            # Persist immediately to disk
             with open(cache_file, "w") as f:
                 json.dump(extracted, f, indent=2)
 
-        # Aggregate results
         return self.aggregate_and_audit(train_df)
 
     def aggregate_and_audit(self, original_df: Optional[pd.DataFrame] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Compiles cached JSONs into train_labels_llm.csv and label_audit.csv."""
+        """
+        Compiles cached JSONs into:
+        1. clean_train.csv (in project root) - all 4,407 rows with full report and non-null labels
+        2. data/processed/train_labels_llm.csv - StudyInstanceUID and 12 binary labels
+        3. data/processed/label_audit.csv - comparative audit against original labels
+        """
         if original_df is None:
             original_df = pd.read_csv(self.train_csv_path)
 
+        clean_rows = []
         records = []
         audit_records = []
 
@@ -293,6 +395,8 @@ class ReportRelabeler:
 
             findings = cached_data.get("findings", {})
             study_labels = {"StudyInstanceUID": study_uid}
+            clean_study_row = row.to_dict()
+
             audit_entry = {
                 "StudyInstanceUID": study_uid,
                 "detected_language": cached_data.get("detected_language", "unknown"),
@@ -301,84 +405,101 @@ class ReportRelabeler:
 
             has_disagreement = False
             for label in TARGET_LABELS:
-                llm_val = int(findings.get(label, {}).get("present", 0))
+                nlp_val = int(findings.get(label, {}).get("present", 0))
                 uncertain = bool(findings.get(label, {}).get("uncertain", False))
                 evidence = str(findings.get(label, {}).get("evidence", ""))
 
-                study_labels[label] = llm_val
-                study_labels[f"{label}_uncertain"] = uncertain
-
-                # Original label comparison
                 orig_val = row.get(label, np.nan)
                 if pd.notna(orig_val):
-                    orig_val = int(orig_val)
-                    disagree = (orig_val != llm_val)
+                    clean_val = int(orig_val)
+                    disagree = (clean_val != nlp_val)
                     if disagree:
                         has_disagreement = True
                         audit_entry["total_disagreements"] += 1
                 else:
+                    clean_val = nlp_val
                     disagree = False
 
+                # In train_labels_llm.csv, store the extracted label
+                study_labels[label] = nlp_val
+                # In clean_train.csv, store the reconciled label
+                clean_study_row[label] = clean_val
+
                 audit_entry[f"{label}_orig"] = orig_val
-                audit_entry[f"{label}_llm"] = llm_val
+                audit_entry[f"{label}_nlp"] = nlp_val
+                audit_entry[f"{label}_final"] = clean_val
                 audit_entry[f"{label}_disagree"] = disagree
                 audit_entry[f"{label}_evidence"] = evidence
 
             audit_entry["is_flagged"] = has_disagreement
             records.append(study_labels)
             audit_records.append(audit_entry)
+            clean_rows.append(clean_study_row)
 
         train_labels_llm = pd.DataFrame(records)
         label_audit = pd.DataFrame(audit_records)
+        clean_train = pd.DataFrame(clean_rows)
 
         # Save to disk
+        out_clean = PROJECT_ROOT / "clean_train.csv"
         out_labels = self.processed_dir / "train_labels_llm.csv"
         out_audit = self.processed_dir / "label_audit.csv"
 
+        clean_train.to_csv(out_clean, index=False)
         train_labels_llm.to_csv(out_labels, index=False)
         label_audit.to_csv(out_audit, index=False)
 
-        logger.info(f"Saved {len(train_labels_llm)} LLM-derived label rows to: {out_labels}")
+        logger.info(f"Saved complete cleaned train set ({len(clean_train)} rows) to: {out_clean}")
+        logger.info(f"Saved {len(train_labels_llm)} label rows to: {out_labels}")
         logger.info(f"Saved audit comparisons to: {out_audit}")
 
-        self._print_audit_summary(label_audit)
+        self._print_audit_summary(label_audit, clean_train)
         return train_labels_llm, label_audit
 
-    def _print_audit_summary(self, audit_df: pd.DataFrame):
+    def _print_audit_summary(self, audit_df: pd.DataFrame, clean_df: pd.DataFrame):
         """Calculates and displays agreement rates and summary statistics."""
-        print("\n" + "=" * 60)
-        print("          PHASE 2 LLM LABEL RE-DERIVATION AUDIT")
-        print("=" * 60)
-        total_studies = len(audit_df)
-        flagged_studies = audit_df["is_flagged"].sum() if "is_flagged" in audit_df.columns else 0
-        print(f"Total Studies Audited: {total_studies}")
-        print(f"Studies with Label Disagreements: {flagged_studies} ({flagged_studies/max(total_studies,1)*100:.1f}%)")
-        print("\nPer-Label Agreement Rates:")
+        print("\n" + "=" * 65)
+        print("          PHASE 2 MULTILINGUAL LABEL RE-DERIVATION AUDIT")
+        print("=" * 65)
+        total_studies = len(clean_df)
+        nan_count = clean_df[TARGET_LABELS].isna().sum().sum()
+        print(f"Total Studies in clean_train.csv: {total_studies}")
+        print(f"Missing (NaN) Labels: {nan_count} (must be 0)")
 
+        # Ground truth agreement
+        gt_mask = audit_df["ACL_orig"].notna()
+        n_gt = gt_mask.sum()
+        print(f"\nStudies with Original Ground Truth: {n_gt}")
+        if n_gt > 0:
+            print("Agreement with Ground Truth (Clinical NLP vs Ground Truth):")
+            for label in TARGET_LABELS:
+                orig_col = f"{label}_orig"
+                nlp_col = f"{label}_nlp"
+                matches = (audit_df.loc[gt_mask, orig_col] == audit_df.loc[gt_mask, nlp_col]).sum()
+                rate = matches / n_gt
+                print(f"  {label:<18}: {rate*100:6.2f}% agreement ({matches}/{n_gt})")
+
+        print("\nFinal Label Prevalence Across Entire Clean Dataset (N=4,407):")
         for label in TARGET_LABELS:
-            orig_col = f"{label}_orig"
-            llm_col = f"{label}_llm"
-            if orig_col in audit_df.columns and llm_col in audit_df.columns:
-                valid_mask = audit_df[orig_col].notna()
-                if valid_mask.sum() > 0:
-                    matches = (audit_df.loc[valid_mask, orig_col] == audit_df.loc[valid_mask, llm_col]).sum()
-                    rate = matches / valid_mask.sum()
-                    print(f"  {label:<18}: {rate*100:.2f}% agreement ({matches}/{valid_mask.sum()})")
-        print("=" * 60 + "\n")
+            pos_cnt = int(clean_df[label].sum())
+            prev = pos_cnt / total_studies * 100
+            print(f"  {label:<18}: {pos_cnt:5d} positive ({prev:5.1f}%)")
+        print("=" * 65 + "\n")
 
 
 def relabel_all_studies(
     raw_dir: Union[str, Path] = "data/raw",
     processed_dir: Union[str, Path] = "data/processed",
     train_csv: str = "train.csv",
-    provider: str = "anthropic",
-    model: str = "claude-3-5-sonnet-20241022",
+    provider: str = "gemini",
+    model: Optional[str] = None,
     api_key: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Top-level helper function for Phase 2 LLM re-labeling.
-    Used by notebooks and Kaggle workflows.
+    Top-level helper function for Phase 2 re-labeling.
+    Used by scripts and Kaggle notebooks.
+    Providers supported: 'gemini', 'anthropic', 'multilingual', 'mock'.
     """
     extractor = LLMExtractor(provider=provider, model=model, api_key=api_key)
     relabeler = ReportRelabeler(
@@ -391,13 +512,25 @@ def relabel_all_studies(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run LLM-based Label Re-derivation")
+    parser = argparse.ArgumentParser(description="Run Multilingual Label Re-derivation with Gemini or local NLP")
     parser.add_argument("--raw-dir", type=str, default="data/raw", help="Path to raw data directory")
     parser.add_argument("--processed-dir", type=str, default="data/processed", help="Path to processed output directory")
     parser.add_argument("--train-csv", type=str, default="train.csv", help="Filename of training CSV")
-    parser.add_argument("--provider", type=str, default="anthropic", help="LLM provider: anthropic, gemini, or mock")
-    parser.add_argument("--model", type=str, default="claude-3-5-sonnet-20241022", help="Model name")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of studies for test run")
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="gemini",
+        choices=["gemini", "google", "anthropic", "multilingual", "mock"],
+        help="Extractor provider: gemini (default), anthropic, multilingual, or mock",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model name (e.g. gemini-2.5-flash, gemini-3.8-flash, claude-3-5-sonnet-20241022)",
+    )
+    parser.add_argument("--api-key", type=str, default=None, help="Gemini or Anthropic API key")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of studies for test/dry run")
     args = parser.parse_args()
 
     relabel_all_studies(
@@ -406,6 +539,7 @@ def main():
         train_csv=args.train_csv,
         provider=args.provider,
         model=args.model,
+        api_key=args.api_key,
         limit=args.limit,
     )
 
